@@ -1,0 +1,590 @@
+---
+title: "Penerapan Algoritma Arima dalam Harga Saham BBRI"
+author: "Yudha H Tejaningrat"
+date: "6 Desember 2023"
+output:
+  pdf_document:
+    toc: true
+  word_document:
+    toc: true
+---
+
+```{r setup, echo=T, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(quantmod)
+library(forecast)
+library(tseries)
+library(Metrics)
+library(tibbletime)
+library(dplyr)
+library(fpp3)
+library(ggplot2)
+library(gridExtra)
+library(knitr)
+library(lmtest)
+library(moments)
+getSymbols('BBRI.JK', periodicity='monthly', from="2007-01-01", to="2023-10-31")
+```
+
+# Pengantar
+
+Laporan singkat ini merupakan eksplorasi penggunaan analisis runtun waktu
+dengan algoritma Arima dalam menghitung harga saham BBRI.
+
+# Data
+
+Berikut _summary_ data yang digunakan dalam penyusunan.
+
+```{r summary_data, echo=T, warning=F}
+summary(BBRI.JK)
+head(BBRI.JK, n=5)
+```
+
+```{r dataset_close, echo=T}
+dataset = Cl(BBRI.JK) %>% as.data.frame()
+dataset_close = data.frame(tanggal=as.Date(row.names(dataset)),
+                           tutup=dataset[,1])
+head(dataset_close)
+```
+
+
+```{r training, echo=T}
+training = as_tbl_time(dataset_close, index = tanggal) %>%   filter_time('2007' ~ '2022')
+training
+```
+
+```{r testing, echo=T}
+testing = as_tbl_time(dataset_close, index = tanggal) %>%   filter_time('2023' ~ '2023')
+testing
+```
+
+Dan berikut diagram _plot_ dari data tersebut.
+
+```{r tsplot_data, echo=T, warning=F}
+ts.plot(training$tutup, col="blue", ylab="Harga Saham (Penutupan)", xlab="Bulan ke-n",
+        main="Data Runtun Waktu Bulanan")
+# Ubah tanggal menjadi bulan
+training$bulan <- format(training$tanggal, "%m")
+# Ubah tanggal menjadi tahun
+training$tahun <- format(training$tanggal, "%Y")
+# Buat boxplot bulanan
+boxplot(tutup ~ bulan, data=training, col="blue", 
+        main="Boxplot Harga Bulanan", xlab="Bulan", ylab="Harga Penutup")
+# Buat boxplot tahunan
+boxplot(tutup ~ tahun, data=training, col="blue", 
+        main="Boxplot Harga Tahunan", xlab="Tahun", ylab="Harga Penutup")
+boxplot(dataset_close$tutup, col="blue", title=FALSE, cex=0.5, pch=19,
+        main="Boxplot Harga Bulanan")
+```
+
+# Pengujian terhadap Data
+
+Sebelum dilakukan estimasi, dilakukan beberapa pengujian terhadap data.
+
+## Dickey-Fuller Unit-Root Test
+
+Berikut hasil pengujian menggunakan Augmented Dickey-Fuller
+dengan fungsi __adf.test__ dari paket __tseries__.
+
+```{r adftest, echo=T, warning=F}
+adf.test(training$tutup)
+```
+
+## Uji Autokolerasi
+
+Berikut hasil pengujian menggunakan Autokorelasi menggunakan
+fungsi __Acf__ dan __Pacf__ dari paket __forecast__.
+
+```{r actest, eval=FALSE, warning=FALSE, include=FALSE}
+#par(mfrow = c(2,1))
+#ts.plot(dataset_close$tutup, col="blue", ylab="Harga Saham (Penutupan)", xlab="Bulan ke-n",
+#        main="Data Runtun Waktu Bulanan")
+par(mfrow = c(1,2))
+Acf(training$tutup, na.action = na.pass)
+Pacf(training$tutup, na.action = na.pass)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Plot time series, ACF, dan PACF dalam satu gambar
+#par(mfrow = c(2, 1), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0))
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0))
+ts.plot(training$tutup, col="blue", ylab="Harga Saham (Penutupan)", xlab="Bulan ke-n",
+        main="Data Runtun Waktu Bulanan")
+Acf(training$tutup, na.action = na.pass, main="Autocorrelation Function (ACF)")
+Pacf(training$tutup, na.action = na.pass, main="Partial Autocorrelation Function (PACF)")
+
+# Menambahkan judul keseluruhan
+mtext("Time Series Plot, ACF, dan PACF", outer = TRUE, cex = 1.5, font = 2)
+```
+
+
+```{r}
+# Plot time series using ggplot2
+ts_plot <- ggplot(training, aes(x = tanggal, y = tutup)) +
+  geom_line(color = "blue") +
+  labs(x = "Tahun - Bulan", y = "Harga Tutup")
+acf_plot <- ggAcf(training$tutup) + labs(title="")
+pacf_plot <- ggPacf(training$tutup) + labs(title="")
+grid.arrange(ts_plot, grid.arrange(acf_plot, pacf_plot, ncol = 2, heights = 1), ncol = 1, heights = c(3, 2))
+```
+
+Dalam contoh ini, kita menggunakan dataset yang dihasilkan secara acak dan mengidentifikasi cut off pada ACF. Kami kemudian menentukan ordo MA (q) berdasarkan lag tempat cut off tersebut terjadi.
+
+Pastikan untuk mengganti dataset dengan data deret waktu yang sesuai dengan analisis Anda.
+
+## Differences
+
+Berikut diagram transformasi _differences_ menggunakan fungsi
+__diff__ dari data dan log natural data.
+
+```{r diff1, eval=FALSE, warning=FALSE, include=FALSE}
+#monthly_diff <- diff(dataset_close$tutup, differences = 1)
+#ts.plot(monthly_diff, col="blue",
+#        main="Differences(1) of Data")
+```
+
+```{r}
+monthly_diff = data.frame(tanggal=as.Date(training$tanggal[2:nrow(training)]),
+                          tutup=as.numeric(diff(training$tutup, differences = 1)))
+# Plot time series using ggplot2
+ts_plot <- ggplot(monthly_diff, aes(x = tanggal, y = tutup)) +
+  geom_line(color = "blue") +
+  labs(title="Differences (1) Harga Tutup", x="Tahun - Bulan", y="Diff(1)")
+acf_plot <- ggAcf(monthly_diff$tutup) + labs(title="")
+pacf_plot <- ggPacf(monthly_diff$tutup) + labs(title="")
+grid.arrange(ts_plot, grid.arrange(acf_plot, pacf_plot, ncol = 2, heights = 1), ncol = 1, heights = c(3, 3))
+```
+
+```{r actest_diff, eval=FALSE, warning=FALSE, include=FALSE}
+par(mfrow = c(1,2))
+Acf(monthly_diff, na.action = na.pass)
+Pacf(monthly_diff, na.action = na.pass)
+```
+
+
+```{r actest_diff2, echo=T, warning=F}
+monthly_diff2 = data.frame(tanggal=as.Date(training$tanggal[3:nrow(training)]),
+                          tutup=as.numeric(diff(training$tutup, differences = 2)))
+# Plot time series using ggplot2
+ts_plot <- ggplot(monthly_diff2, aes(x = tanggal, y = tutup)) +
+  geom_line(color = "blue") +
+  labs(title="Differences (2) Harga Tutup", x="Tahun - Bulan", y="Diff(2)")
+acf_plot <- ggAcf(monthly_diff2$tutup) + labs(title="")
+pacf_plot <- ggPacf(monthly_diff2$tutup) + labs(title="")
+grid.arrange(ts_plot, grid.arrange(acf_plot, pacf_plot, ncol = 2, heights = 1), ncol = 1, heights = c(3, 3))
+```
+
+# Identifikasi ARMA
+
+## Tanpa Differencing
+
+```{r ordo_ar_p_dari_lag_pacf}
+# Plot PACF
+pacf_plot <- pacf(training$tutup, main = "Partial Autocorrelation Function (PACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(dataset))
+# Identifikasi lag pertama di mana PACF melewati cut off
+lag_with_cut_off <- which(abs(pacf_plot$acf) < cut_off)[1]
+# Tentukan ordo AR (p) berdasarkan lag dengan cut off
+order_ar <- lag_with_cut_off - 1
+#cat("Order of AR (p):", order_ar, "\n")
+```
+
+Karena pada PACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk AR adalah `r order_ar`.
+
+```{r ordo_ma_q_dari_lag_acf}
+# Plot ACF
+acf_plot <- acf(training$tutup, main = "Autocorrelation Function (ACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(training))
+# Identifikasi lag pertama di mana ACF melewati cut off
+lag_with_cut_off <- which(abs(acf_plot$acf) < cut_off)[1]
+# Tentukan ordo MA (q) berdasarkan lag dengan cut off
+order_ma <- lag_with_cut_off - 1
+#cat("Order of MA (q):", order_ma, "\n")
+```
+
+Karena pada ACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk MA adalah `r order_ma`.
+
+Sehingga saran model ARIMA adalah ARIMA( `r order_ar` , 0, `r order_ma` ).
+
+## Differencing 1
+
+```{r d1_ordo_ar_p_dari_lag_pacf}
+# Plot PACF
+pacf_plot <- pacf(monthly_diff$tutup, main = "Partial Autocorrelation Function (PACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(monthly_diff))
+# Identifikasi lag pertama di mana PACF melewati cut off
+lag_with_cut_off <- which(abs(pacf_plot$acf) < cut_off)[1]
+# Tentukan ordo AR (p) berdasarkan lag dengan cut off
+order_ar <- lag_with_cut_off - 1
+#cat("Order of AR (p):", order_ar, "\n")
+```
+
+Karena pada PACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk AR adalah `r order_ar`.
+
+```{r d1_ordo_ma_q_dari_lag_acf}
+# Plot ACF
+acf_plot <- acf(monthly_diff$tutup, main = "Autocorrelation Function (ACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(monthly_diff))
+# Identifikasi lag pertama di mana ACF melewati cut off
+lag_with_cut_off <- which(abs(acf_plot$acf) < cut_off)[1]
+# Tentukan ordo MA (q) berdasarkan lag dengan cut off
+order_ma <- lag_with_cut_off - 1
+#cat("Order of MA (q):", order_ma, "\n")
+```
+
+Karena pada ACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk MA adalah `r order_ma`.
+
+Sehingga saran model ARIMA adalah ARIMA( `r order_ar` , 1, `r order_ma` ).
+
+## Differencing 2
+
+```{r d2_ordo_ar_p_dari_lag_pacf}
+# Plot PACF
+pacf_plot <- pacf(monthly_diff2$tutup, main = "Partial Autocorrelation Function (PACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(monthly_diff2))
+# Identifikasi lag pertama di mana PACF melewati cut off
+lag_with_cut_off <- which(abs(pacf_plot$acf) < cut_off)[1]
+# Tentukan ordo AR (p) berdasarkan lag dengan cut off
+order_ar <- lag_with_cut_off - 1
+#cat("Order of AR (p):", order_ar, "\n")
+```
+
+Karena pada PACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk AR adalah `r order_ar`.
+
+```{r d2_ordo_ma_q_dari_lag_acf}
+# Plot ACF
+acf_plot <- acf(monthly_diff2$tutup, main = "Autocorrelation Function (ACF)")
+# Tentukan cut off
+cut_off <- 2 / sqrt(length(monthly_diff2))
+# Identifikasi lag pertama di mana ACF melewati cut off
+lag_with_cut_off <- which(abs(acf_plot$acf) < cut_off)[1]
+# Tentukan ordo MA (q) berdasarkan lag dengan cut off
+order_ma <- lag_with_cut_off - 1
+#cat("Order of MA (q):", order_ma, "\n")
+```
+
+Karena pada ACF _cut-off_ pada `r cut_off` dan _lag_ adalah `r lag_with_cut_off`, maka ordo untuk MA adalah `r order_ma`.
+
+Sehingga saran model ARIMA adalah ARIMA( `r order_ar` , 2, `r order_ma` ).
+
+# Estimasi menggunakan Arima
+
+Berikut data akhir yang akan di test.
+
+```{r return_check, echo=T, warning=F}
+actual <- testing
+model_cv <- data.frame(model=character(), aic=numeric(), mape_test=numeric(),
+                       mae_test=numeric(), rmse_test=numeric())
+```
+
+## Auto.ARIMA
+
+```{r arima_auto, echo=T, warning=F}
+mfitauto <- auto.arima(training$tutup, seasonal = FALSE, allowdrift = FALSE,
+                       max.p = 10, max.d = 3, max.q = 10)
+mfcastauto <- forecast(mfitauto, h=10)
+plot(mfcastauto, main="Forecasts, Auto.ARIMA")
+```
+
+```{r arima_auto_summary, echo=T, warning=F}
+summary(mfitauto)
+summary(mfcastauto)
+```
+
+```{r cv, echo=T, warning=F}
+m1 = data.frame(model="auto.arima / arima(1,1,1)", aic=mfitauto$aic,
+                mape_test=mape(mfcastauto$mean, actual$tutup),
+                mae_test=mae(mfcastauto$mean, actual$tutup),
+                rmse_test = rmse(mfcastauto$mean, actual$tutup))
+print(t(m1[,2:5]))
+```
+
+## ARIMA (0,1,0)
+
+```{r arima_010, echo=T, warning=F}
+mfit010 <- arima(training$tutup, order=c(0,1,0))
+mfcast010 <- forecast(mfit010, h=10)
+plot(mfcast010, main="Forecasts, ARIMA(0,1,0)")
+```
+
+```{r arima_010_summary, echo=T, warning=F}
+summary(mfit010)
+summary(mfcast010)
+```
+
+```{r cv010, echo=T, warning=F}
+m2 = data.frame(model="arima(0,1,0)", aic=mfit010$aic,
+                mape_test=mape(mfcast010$mean, actual$tutup),
+                mae_test=mae(mfcast010$mean, actual$tutup),
+                rmse_test = rmse(mfcast010$mean, actual$tutup))
+print(t(m2[,2:5]))
+```
+
+## ARIMA (2,2,1)
+
+```{r arima_221, echo=T, warning=F}
+mfit221 <- arima(dataset_close$tutup, order=c(2,2,1))
+mfcast221 <- forecast(mfit221, h=10)
+plot(mfcast221, main="Forecasts, ARIMA(2,2,1)")
+```
+
+```{r arima_221_summary, echo=T, warning=F}
+summary(mfit221)
+summary(mfcast221)
+```
+
+```{r cv221, echo=T, warning=F}
+m3 = data.frame(model="arima(2,2,1)", aic=mfit221$aic,
+                mape_test=mape(mfcast221$mean, actual$tutup),
+                mae_test=mae(mfcast221$mean, actual$tutup),
+                rmse_test = rmse(mfcast221$mean, actual$tutup))
+print(t(m3[,2:5]))
+```
+
+## ARIMA (3,1,3)
+
+```{r arima_313, echo=T, warning=F}
+mfit313 <- arima(training$tutup, order=c(3,1,3))
+mfcast313 <- forecast(mfit313, h=10)
+plot(mfcast313, main="Forecasts, ARIMA(3,1,3)")
+```
+
+```{r arima_313_summary, echo=T, warning=F}
+summary(mfit313)
+summary(mfcast313)
+```
+
+```{r cv313, echo=T, warning=F}
+m4 = data.frame(model="arima(3,1,3)", aic=mfit313$aic,
+                mape_test=mape(mfcast313$mean, actual$tutup),
+                mae_test=mae(mfcast313$mean, actual$tutup),
+                rmse_test = rmse(mfcast313$mean, actual$tutup))
+print(t(m4[,2:5]))
+```
+
+## ARIMA (7,3,1)
+
+```{r arima_731, echo=T, warning=F}
+mfit731 <- arima(dataset_close$tutup, order=c(7,3,1))
+mfcast731 <- forecast(mfit731, h=10)
+plot(mfcast731, main="Forecasts, ARIMA(7,3,1)")
+```
+
+```{r arima_731_summary, echo=T, warning=F}
+summary(mfit731)
+summary(mfcast731)
+```
+
+```{r cv731, echo=T, warning=F}
+m5 = data.frame(model="arima(7,3,1)", aic=mfit731$aic,
+                mape_test=mape(mfcast731$mean, actual$tutup),
+                mae_test=mae(mfcast731$mean, actual$tutup),
+                rmse_test = rmse(mfcast731$mean, actual$tutup))
+print(t(m5[,2:5]))
+```
+
+## Uji Model ARIMA Tambahan
+
+```{r arima_211, echo=T, warning=F}
+mfit211 <- arima(training$tutup, order=c(2,1,1))
+mfcast211 <- forecast(mfit211, h=10)
+m6 = data.frame(model="arima(2,1,1)", aic=mfit211$aic,
+                mape_test=mape(mfcast211$mean, actual$tutup),
+                mae_test=mae(mfcast211$mean, actual$tutup),
+                rmse_test = rmse(mfcast211$mean, actual$tutup))
+print(t(m6[,2:5]))
+```
+
+```{r arima_212, echo=T, warning=F}
+mfit212 <- arima(training$tutup, order=c(2,1,2))
+mfcast212 <- forecast(mfit212, h=10)
+m7 = data.frame(model="arima(2,1,2)", aic=mfit212$aic,
+                mape_test=mape(mfcast212$mean, actual$tutup),
+                mae_test=mae(mfcast212$mean, actual$tutup),
+                rmse_test = rmse(mfcast212$mean, actual$tutup))
+print(t(m7[,2:5]))
+```
+
+```{r arima_213, echo=T, warning=F}
+mfit213 <- arima(training$tutup, order=c(2,1,3))
+mfcast213 <- forecast(mfit213, h=10)
+m8 = data.frame(model="arima(2,1,3)", aic=mfit213$aic,
+                mape_test=mape(mfcast213$mean, actual$tutup),
+                mae_test=mae(mfcast213$mean, actual$tutup),
+                rmse_test = rmse(mfcast213$mean, actual$tutup))
+print(t(m8[,2:5]))
+```
+
+```{r arima_311, echo=T, warning=F}
+mfit311 <- arima(training$tutup, order=c(3,1,1))
+mfcast311 <- forecast(mfit311, h=10)
+m9 = data.frame(model="arima(3,1,1)", aic=mfit311$aic,
+                mape_test=mape(mfcast311$mean, actual$tutup),
+                mae_test=mae(mfcast311$mean, actual$tutup),
+                rmse_test = rmse(mfcast311$mean, actual$tutup))
+print(t(m9[,2:5]))
+```
+
+```{r arima_312, echo=T, warning=F}
+mfit312 <- arima(training$tutup, order=c(3,1,2))
+mfcast312 <- forecast(mfit312, h=10)
+m10 = data.frame(model="arima(3,1,2)", aic=mfit312$aic,
+                mape_test=mape(mfcast312$mean, actual$tutup),
+                mae_test=mae(mfcast312$mean, actual$tutup),
+                rmse_test = rmse(mfcast312$mean, actual$tutup))
+print(t(m10[,2:5]))
+```
+
+```{r arima_112, echo=T, warning=F}
+mfit112 <- arima(training$tutup, order=c(1,1,2))
+mfcast112 <- forecast(mfit112, h=10)
+m11 = data.frame(model="arima(1,1,2)", aic=mfit112$aic,
+                mape_test=mape(mfcast112$mean, actual$tutup),
+                mae_test=mae(mfcast112$mean, actual$tutup),
+                rmse_test = rmse(mfcast112$mean, actual$tutup))
+print(t(m11[,2:5]))
+```
+
+```{r arima_113, echo=T, warning=F}
+mfit113 <- arima(training$tutup, order=c(1,1,3))
+mfcast113 <- forecast(mfit113, h=10)
+m12 = data.frame(model="arima(1,1,3)", aic=mfit113$aic,
+                mape_test=mape(mfcast113$mean, actual$tutup),
+                mae_test=mae(mfcast113$mean, actual$tutup),
+                rmse_test = rmse(mfcast113$mean, actual$tutup))
+print(t(m12[,2:5]))
+```
+
+```{r arima_411, echo=T, warning=F}
+mfit411 <- arima(training$tutup, order=c(4,1,1))
+mfcast411 <- forecast(mfit411, h=10)
+m13 = data.frame(model="arima(4,1,1)", aic=mfit411$aic,
+                mape_test=mape(mfcast411$mean, actual$tutup),
+                mae_test=mae(mfcast411$mean, actual$tutup),
+                rmse_test = rmse(mfcast411$mean, actual$tutup))
+print(t(m13[,2:5]))
+```
+
+```{r arima_412, echo=T, warning=F}
+mfit412 <- arima(training$tutup, order=c(4,1,2))
+mfcast412 <- forecast(mfit412, h=10)
+m14 = data.frame(model="arima(4,1,2)", aic=mfit412$aic,
+                mape_test=mape(mfcast412$mean, actual$tutup),
+                mae_test=mae(mfcast412$mean, actual$tutup),
+                rmse_test = rmse(mfcast412$mean, actual$tutup))
+print(t(m14[,2:5]))
+```
+
+```{r arima_413, echo=T, warning=F}
+mfit413 <- arima(training$tutup, order=c(4,1,3))
+mfcast413 <- forecast(mfit413, h=10)
+m15 = data.frame(model="arima(4,1,3)", aic=mfit413$aic,
+                mape_test=mape(mfcast413$mean, actual$tutup),
+                mae_test=mae(mfcast413$mean, actual$tutup),
+                rmse_test = rmse(mfcast413$mean, actual$tutup))
+print(t(m15[,2:5]))
+```
+
+```{r arima_414, echo=T, warning=F}
+mfit414 <- arima(training$tutup, order=c(4,1,4))
+mfcast414 <- forecast(mfit414, h=10)
+m16 = data.frame(model="arima(4,1,4)", aic=mfit414$aic,
+                mape_test=mape(mfcast414$mean, actual$tutup),
+                mae_test=mae(mfcast414$mean, actual$tutup),
+                rmse_test = rmse(mfcast414$mean, actual$tutup))
+print(t(m16[,2:5]))
+```
+
+
+# Kesimpulan
+
+## Model Terbaik
+
+```{r, echo=T}
+eval = rbind(model_cv, m1, m2, m3, m11, m12, m6, m7, m8, 
+             m9, m10, m4, m5, m13, m14, m15, m16)
+kable(eval)
+```
+
+```{r}
+summary(mfcast313$model)
+```
+
+## Diagnostik 
+
+```{r}
+#coeftest(mfcast313)
+```
+
+```{r residual_model}
+residuals = mfit313$residuals
+```
+
+```{r normality_test}
+shapiro.test(residuals)
+```
+
+```{r stationary_test}
+adf.test(residuals)
+```
+
+```{r heterokedasticity_test}
+model <- lm(residuals^2 ~ seq_along(residuals))
+bptest(model)
+```
+
+```{r autocorrelation_test}
+Box.test(residuals)
+```
+
+```{r error_forecast_test}
+plot(residuals ~ time(residuals), main = "Residuals vs Time", ylab = "Residuals")
+```
+
+```{r}
+par(mfrow = c(1,2))
+hist(residuals, main = "Histogram of Residuals", xlab = "Residuals")
+qqnorm(residuals)
+qqline(residuals)
+```
+
+```{r outlier_test}
+influence.measures(lm(residuals ~ 1))
+```
+
+```{r whitenoise_test}
+acf(residuals, lag.max = 20)
+```
+
+
+```{r}
+# Uji Autokorelasi Residuals (ACF1)
+Box.test(residuals, lag = 1, type = "Ljung-Box")
+```
+
+```{r}
+checkresiduals(mfcast313)
+```
+
+## Peramalan
+
+```{r echo=TRUE, warning=FALSE}
+dataset$tutup = dataset_close$tutup
+row.names(dataset) = as.Date(dataset_close$tanggal)
+mfit_eval <- arima(dataset$tutup, order=c(3,1,3))
+summary(mfit_eval)
+```
+
+```{r echo=TRUE, warning=FALSE}
+mfcast_eval <- forecast(mfit_eval, h=8)
+plot(mfcast_eval, xlim = c(length(dataset_close$tutup) - 20, length(dataset_close$tutup) + 8))
+```
+
+```{r}
+summary(mfcast_eval)
+```
